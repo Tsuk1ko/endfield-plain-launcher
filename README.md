@@ -14,8 +14,9 @@
 | 参数           | 默认值   | 含义                                                                                    |
 | -------------- | -------- | --------------------------------------------------------------------------------------- |
 | `LauncherRoot` | 空字符串 | 启动器根目录，例如 `D:\Program Files\Hypergryph Launcher`。省略或为空时通过注册表查找。 |
+| `GameArgs`     | 空字符串 | 附加给 `Endfield.exe` 的完整命令行参数字符串。省略或为空时不附加参数。                  |
 
-指定安装目录：
+### 指定安装目录
 
 ```powershell
 .\Launcher.exe -LauncherRoot 'D:\Program Files\Hypergryph Launcher'
@@ -32,6 +33,22 @@ Hypergryph Launcher\
     └── Endfield Game\
         └── Endfield.exe
 ```
+
+### 附加游戏参数
+
+```powershell
+.\Launcher.exe -GameArgs:"-launcher_lang=zh-cn -force-d3d11 -launcher_sub_channel=1"
+```
+
+封装后的 EXE 使用 `-GameArgs:"..."`，以免 PS2EXE 将以 `-` 开头的值识别为另一个参数。直接运行脚本时使用：
+
+```powershell
+.\Launcher.ps1 -GameArgs '-launcher_lang=zh-cn -force-d3d11 -launcher_sub_channel=1'
+```
+
+`GameArgs` 原样追加到带引号的游戏路径之后，不拆分参数，也不执行其中的 PowerShell 表达式。参数值含空格时，需要保留供游戏解析的双引号；例如直接运行脚本可写成 `-GameArgs '-example="value with spaces"'`。封装 EXE 的内嵌引号还需按调用它的 shell 转义。具体参数是否生效由游戏决定。
+
+### 其他
 
 正常退出游戏后由脚本完成启动器进程清理。
 

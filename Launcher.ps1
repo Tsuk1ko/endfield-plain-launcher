@@ -12,7 +12,8 @@ relaunches itself or delegates its lifetime to a different process.
 #>
 [CmdletBinding()]
 param(
-    [string] $LauncherRoot = ''
+    [string] $LauncherRoot = '',
+    [string] $GameArgs = ''
 )
 
 function Get-LauncherInstall {
@@ -131,7 +132,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class EndfieldParentLaunchV2
+public static class EndfieldParentLaunch
 {
     const uint CREATE_SUSPENDED = 0x00000004;
     const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
@@ -299,7 +300,7 @@ public static class EndfieldParentLaunchV2
         return new PROCESS_INFORMATION();
     }
 
-    public static PROCESS_INFORMATION CreateGame(string path, IntPtr parent)
+    public static PROCESS_INFORMATION CreateGame(string path, IntPtr parent, string gameArgs)
     {
         IntPtr bytes = IntPtr.Zero;
         IntPtr list = IntPtr.Zero;
@@ -326,7 +327,9 @@ public static class EndfieldParentLaunchV2
             si.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOEX));
             si.lpAttributeList = list;
             PROCESS_INFORMATION pi;
-            if (!CreateProcessExtended(path, new StringBuilder("\"" + path + "\""),
+            StringBuilder commandLine = new StringBuilder("\"" + path + "\"");
+            if (!String.IsNullOrEmpty(gameArgs)) commandLine.Append(' ').Append(gameArgs);
+            if (!CreateProcessExtended(path, commandLine,
                 IntPtr.Zero, IntPtr.Zero, false, EXTENDED_STARTUPINFO_PRESENT,
                 IntPtr.Zero, Path.GetDirectoryName(path), ref si, out pi))
                 throw Error("Create Endfield.exe with specified parent");
@@ -375,39 +378,39 @@ public static class EndfieldParentLaunchV2
 }
 '@
 
-if (-not ('EndfieldParentLaunchV2' -as [type])) {
+if (-not ('EndfieldParentLaunch' -as [type])) {
     Add-Type -TypeDefinition $nativeSource
 }
-[EndfieldParentLaunchV2]::ValidateLayout()
+[EndfieldParentLaunch]::ValidateLayout()
 
-$parentInfo = New-Object 'EndfieldParentLaunchV2+PROCESS_INFORMATION'
-$gameInfo = New-Object 'EndfieldParentLaunchV2+PROCESS_INFORMATION'
+$parentInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
+$gameInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
 $ownsParent = $false
 try {
-    $parentInfo = [EndfieldParentLaunchV2]::FindExistingParent($paths.Games, $paths.Root)
+    $parentInfo = [EndfieldParentLaunch]::FindExistingParent($paths.Games, $paths.Root)
     if ($parentInfo.hProcess -eq [IntPtr]::Zero) {
-        $parentInfo = [EndfieldParentLaunchV2]::CreateSuspendedParent($paths.Games)
+        $parentInfo = [EndfieldParentLaunch]::CreateSuspendedParent($paths.Games)
         $ownsParent = $true
         Write-Host "Created suspended Games.exe PID: $($parentInfo.dwProcessId)"
     }
     else {
         Write-Host "Reusing Games.exe PID: $($parentInfo.dwProcessId); it will NOT be terminated."
     }
-    $gameInfo = [EndfieldParentLaunchV2]::CreateGame($paths.Game, $parentInfo.hProcess)
+    $gameInfo = [EndfieldParentLaunch]::CreateGame($paths.Game, $parentInfo.hProcess, $GameArgs)
     Write-Host "Endfield.exe PID: $($gameInfo.dwProcessId); parent PID: $($parentInfo.dwProcessId)"
     Write-Host 'Waiting for Endfield.exe to exit. Keep this console open.'
     # INFINITE waits on the kernel process object without a recurring timer.
-    $null = [EndfieldParentLaunchV2]::HasExited($gameInfo.hProcess, [uint32]::MaxValue)
-    $gameExitCode = [EndfieldParentLaunchV2]::ExitCode($gameInfo.hProcess)
+    $null = [EndfieldParentLaunch]::HasExited($gameInfo.hProcess, [uint32]::MaxValue)
+    $gameExitCode = [EndfieldParentLaunch]::ExitCode($gameInfo.hProcess)
     Write-Host ('Endfield.exe exited: {0} (0x{0:X8})' -f $gameExitCode)
 }
 finally {
     try {
-        if ($ownsParent) { [EndfieldParentLaunchV2]::StopParent($parentInfo) }
+        if ($ownsParent) { [EndfieldParentLaunch]::StopParent($parentInfo) }
     }
     finally {
-        [EndfieldParentLaunchV2]::Close($gameInfo)
-        [EndfieldParentLaunchV2]::Close($parentInfo)
+        [EndfieldParentLaunch]::Close($gameInfo)
+        [EndfieldParentLaunch]::Close($parentInfo)
     }
 }
 }
