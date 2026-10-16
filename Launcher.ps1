@@ -106,6 +106,18 @@ function Resolve-EndfieldPaths {
 }
 
 $ErrorActionPreference = 'Stop'
+$instanceMutex = [System.Threading.Mutex]::new($false, 'Local\Tsuk1ko.EndfieldPlainLauncher')
+$ownsInstanceMutex = $false
+try {
+    try {
+        $ownsInstanceMutex = $instanceMutex.WaitOne(0)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # WaitOne grants ownership when the previous owner terminated unexpectedly.
+        $ownsInstanceMutex = $true
+    }
+    if (-not $ownsInstanceMutex) { return }
+
 if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
 $paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot
 Write-Host "Games.exe: $($paths.Games)"
@@ -396,5 +408,14 @@ finally {
     finally {
         [EndfieldParentLaunchV2]::Close($gameInfo)
         [EndfieldParentLaunchV2]::Close($parentInfo)
+    }
+}
+}
+finally {
+    try {
+        if ($ownsInstanceMutex) { $instanceMutex.ReleaseMutex() }
+    }
+    finally {
+        $instanceMutex.Dispose()
     }
 }
