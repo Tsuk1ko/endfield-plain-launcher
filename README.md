@@ -40,13 +40,7 @@ Hypergryph Launcher\
 .\Launcher.exe -GameArgs:"-launcher_lang=zh-cn -force-d3d11 -launcher_sub_channel=1"
 ```
 
-封装后的 EXE 使用 `-GameArgs:"..."`，以免 PS2EXE 将以 `-` 开头的值识别为另一个参数。直接运行脚本时使用：
-
-```powershell
-.\Launcher.ps1 -GameArgs '-launcher_lang=zh-cn -force-d3d11 -launcher_sub_channel=1'
-```
-
-`GameArgs` 原样追加到带引号的游戏路径之后，不拆分参数，也不执行其中的 PowerShell 表达式。参数值含空格时，需要保留供游戏解析的双引号；例如直接运行脚本可写成 `-GameArgs '-example="value with spaces"'`。封装 EXE 的内嵌引号还需按调用它的 shell 转义。具体参数是否生效由游戏决定。
+封装后的 EXE 使用 `-GameArgs:"..."`，以免 PS2EXE 将以 `-` 开头的值识别为另一个参数。
 
 ### 其他
 
