@@ -13,6 +13,7 @@ relaunches itself or delegates its lifetime to a different process.
 [CmdletBinding()]
 param(
     [string] $LauncherRoot = '',
+    [string] $GamePath = '',
     [string] $GameArgs = ''
 )
 
@@ -103,7 +104,7 @@ function Resolve-GameExecutable {
 }
 
 function Resolve-EndfieldPaths {
-    param([string] $LauncherRoot = '')
+    param([string] $LauncherRoot = '', [string] $GamePath = '')
     $registeredVersion = $null
     if (-not $LauncherRoot) {
         $install = Get-LauncherInstall
@@ -115,7 +116,15 @@ function Resolve-EndfieldPaths {
     }
     $root = (Resolve-Path -LiteralPath $LauncherRoot).ProviderPath
     $GamesPath = Resolve-GamesExecutable -Root $root -RegisteredVersion $registeredVersion
-    $GamePath = Resolve-GameExecutable -Root $root
+    if ($GamePath) {
+        if (Test-Path -LiteralPath $GamePath -PathType Container) { $GamePath = Join-Path $GamePath 'Endfield.exe' }
+        if (-not (Test-Path -LiteralPath $GamePath -PathType Leaf)) {
+            throw "Executable not found: $GamePath . Check -GamePath."
+        }
+    }
+    else {
+        $GamePath = Resolve-GameExecutable -Root $root
+    }
     if (-not (Test-Path -LiteralPath $GamesPath -PathType Leaf)) {
         throw "Executable not found: $GamesPath . Check the installation under -LauncherRoot."
     }
@@ -140,7 +149,7 @@ try {
     if (-not $ownsInstanceMutex) { return }
 
 if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
-$paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot
+$paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot -GamePath $GamePath
 Write-Host "Games.exe: $($paths.Games)"
 Write-Host "Endfield.exe: $($paths.Game)"
 
