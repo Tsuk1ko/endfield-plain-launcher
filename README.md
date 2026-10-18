@@ -30,9 +30,11 @@ Hypergryph Launcher\
 ├── 1.6.0\
 │   └── Games.exe
 └── games\
-    └── Endfield Game\
+    └── Arknights Endfield\
         └── Endfield.exe
 ```
+
+新版启动器把游戏安装到 `Arknights Endfield` 目录，旧版使用 `Endfield Game`，脚本两者都支持。
 
 ### 附加游戏参数
 
@@ -87,7 +89,13 @@ Hypergryph Launcher\
 2. 读取根目录 `Launcher.exe` 的文件版本，取前三段拼接版本目录。例如 `1.6.0.1604` 对应 `1.6.0\Games.exe`。
 3. 枚举根目录的直接子目录，将可解析为版本号且包含 `Games.exe` 的目录按数字版本降序排列，选择最高版本。此时会显示回退提示；`1.10.0` 会排在 `1.9.0` 前面。
 
-游戏路径固定为 `<根目录>\games\Endfield Game\Endfield.exe`。脚本不搜索其他磁盘，也不提供独立游戏路径参数。根目录或任一程序无法找到时，会在创建或复用进程之前报错退出。
+游戏路径按以下优先级寻找 `Endfield.exe`，每个候选都须实际存在：
+
+1. `<根目录>\games\Arknights Endfield\Endfield.exe`，新版启动器的默认目录名。
+2. `<根目录>\games\Endfield Game\Endfield.exe`，旧版启动器的目录名。
+3. 枚举 `<根目录>\games` 的直接子目录，找出包含 `Endfield.exe` 的目录。仅在恰好一个候选时使用并显示回退提示；多个候选时报错并列出路径，不会任选一个。
+
+脚本不搜索其他磁盘，也不提供独立游戏路径参数。根目录或任一程序无法找到时，会在创建或复用进程之前报错退出。
 
 ### 2. 优先复用已有的 Games.exe
 
