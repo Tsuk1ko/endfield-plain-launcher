@@ -13,6 +13,7 @@ relaunches itself or delegates its lifetime to a different process.
 [CmdletBinding()]
 param(
     [string] $LauncherRoot = '',
+    [string] $GamePath = '',
     [string] $GameArgs = ''
 )
 
@@ -80,8 +81,30 @@ function Resolve-GamesExecutable {
     return $latest.Path
 }
 
+function Resolve-GameExecutable {
+    param([string] $Root)
+    $games = Join-Path $Root 'games'
+    # New launcher builds install to "Arknights Endfield"; older ones used "Endfield Game".
+    foreach ($name in @('Arknights Endfield', 'Endfield Game')) {
+        $candidate = Join-Path $games "$name\Endfield.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    $candidates = @(foreach ($folder in (Get-ChildItem -LiteralPath $games -Directory -ErrorAction SilentlyContinue)) {
+        $candidate = Join-Path $folder.FullName 'Endfield.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+    })
+    if ($candidates.Count -eq 1) {
+        Write-Warning "No known game directory name; using $($candidates[0])."
+        return $candidates[0]
+    }
+    if ($candidates.Count -eq 0) {
+        throw "Endfield.exe not found under: $(Join-Path $games '*'). Check the installation under -LauncherRoot."
+    }
+    throw "Multiple Endfield.exe candidates found under ${games}: $($candidates -join '; '). Remove the unused installation or report the layout."
+}
+
 function Resolve-EndfieldPaths {
-    param([string] $LauncherRoot = '')
+    param([string] $LauncherRoot = '', [string] $GamePath = '')
     $registeredVersion = $null
     if (-not $LauncherRoot) {
         $install = Get-LauncherInstall
@@ -93,11 +116,17 @@ function Resolve-EndfieldPaths {
     }
     $root = (Resolve-Path -LiteralPath $LauncherRoot).ProviderPath
     $GamesPath = Resolve-GamesExecutable -Root $root -RegisteredVersion $registeredVersion
-    $GamePath = Join-Path $root 'games\Endfield Game\Endfield.exe'
-    foreach ($executable in @($GamesPath, $GamePath)) {
-        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-            throw "Executable not found: $executable . Check the installation under -LauncherRoot."
+    if ($GamePath) {
+        if (Test-Path -LiteralPath $GamePath -PathType Container) { $GamePath = Join-Path $GamePath 'Endfield.exe' }
+        if (-not (Test-Path -LiteralPath $GamePath -PathType Leaf)) {
+            throw "Executable not found: $GamePath . Check -GamePath."
         }
+    }
+    else {
+        $GamePath = Resolve-GameExecutable -Root $root
+    }
+    if (-not (Test-Path -LiteralPath $GamesPath -PathType Leaf)) {
+        throw "Executable not found: $GamesPath . Check the installation under -LauncherRoot."
     }
     return [pscustomobject]@{
         Games = (Resolve-Path -LiteralPath $GamesPath).ProviderPath
@@ -120,7 +149,7 @@ try {
     if (-not $ownsInstanceMutex) { return }
 
 if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
-$paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot
+$paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot -GamePath $GamePath
 Write-Host "Games.exe: $($paths.Games)"
 Write-Host "Endfield.exe: $($paths.Game)"
 
