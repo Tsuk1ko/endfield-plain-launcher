@@ -14,7 +14,7 @@
 | 参数           | 默认值   | 含义                                                                                    |
 | -------------- | -------- | --------------------------------------------------------------------------------------- |
 | `LauncherRoot` | 空字符串 | 启动器根目录，例如 `D:\Program Files\Hypergryph Launcher`。省略或为空时通过注册表查找。 |
-| `GamePath`     | 空字符串 | 游戏目录或 `Endfield.exe` 完整路径。省略或为空时在启动器根目录下自动查找。              |
+| `GamePath`     | 空字符串 | 游戏目录或 `Endfield.exe` 完整路径。省略或为空时先读取加密配置，再尝试默认目录。        |
 | `GameArgs`     | 空字符串 | 附加给 `Endfield.exe` 的完整命令行参数字符串。省略或为空时不附加参数。                  |
 
 ### 指定安装目录
@@ -35,7 +35,7 @@ Hypergryph Launcher\
         └── Endfield.exe
 ```
 
-新版启动器把游戏安装到 `Arknights Endfield` 目录，旧版使用 `Endfield Game`，脚本两者都支持。
+默认目录可能为 `Arknights Endfield` 或 `Endfield Game`，脚本两者都支持。
 
 ### 指定游戏目录
 
@@ -45,7 +45,7 @@ Hypergryph Launcher\
 
 `-GamePath` 可传游戏目录，也可传 `Endfield.exe` 的完整路径；非空时优先于自动查找，适用于改过安装路径、多个游戏安装或目录名无法识别的情况。`LauncherRoot` 仍需正确，脚本要从那里取 `Games.exe`。
 
-游戏目录本身无法从启动器配置中明文读取：`Cache\Config\Config` 是 `4 字节长度 + 密文`，版本目录下的 `eld_Games.db` 与游戏目录内的 `config.ini` 也都整体加密，因此自动查找只能依据目录名和扫描结果。
+脚本可只读解密当前 Windows 用户的启动器配置，获取自定义游戏安装目录，无需解密启动器的数据库。
 
 ### 附加游戏参数
 
@@ -100,13 +100,18 @@ Hypergryph Launcher\
 2. 读取根目录 `Launcher.exe` 的文件版本，取前三段拼接版本目录。例如 `1.6.0.1604` 对应 `1.6.0\Games.exe`。
 3. 枚举根目录的直接子目录，将可解析为版本号且包含 `Games.exe` 的目录按数字版本降序排列，选择最高版本。此时会显示回退提示；`1.10.0` 会排在 `1.9.0` 前面。
 
-游戏路径优先使用 `-GamePath`，未指定时按以下优先级寻找 `Endfield.exe`，每个候选都须实际存在：
+游戏路径按以下优先级寻找，每个候选都须实际存在：
 
-1. `<根目录>\games\Arknights Endfield\Endfield.exe`，新版启动器的默认目录名。
-2. `<根目录>\games\Endfield Game\Endfield.exe`，旧版启动器的目录名。
-3. 枚举 `<根目录>\games` 的直接子目录，找出包含 `Endfield.exe` 的目录。仅在恰好一个候选时使用并显示回退提示；多个候选时报错并列出路径，不会任选一个。
+1. 非空 `-GamePath`：接受游戏目录或可执行文件路径。指定的路径无效时直接报错，不回退。
+2. 解密 `%USERPROFILE%\AppData\LocalLow\HyperGryph\<launcherId>\config\config_cache`，读取 `game_install_path_` 记录，检查目录下的 `Endfield.exe`。多个不同的有效路径会报错，需用 `-GamePath` 选择。
+3. `<根目录>\games\Arknights Endfield\Endfield.exe`。
+4. `<根目录>\games\Endfield Game\Endfield.exe`。
 
-脚本不搜索其他磁盘。游戏安装在启动器根目录之外或存在多个安装时，用 `-GamePath` 显式指定。根目录或任一程序无法找到时，会在创建或复用进程之前报错退出。
+配置读取会枚举 `HKCU\Software\HyperGryph\Launcher` 的子项，以对应的 `REG_GUID` 原文拼接固定常量 `*B59C326D-A124-413B-AABC-0D98D8B41966*`，计算 UTF-8 MD5。取大写十六进制结果的前 16 个 ASCII 字节作为 AES 密钥，使用 `.crc` 中偏移 12 的 16 字节 IV 按 CFB128 解密。解析前检查有效长度和 CRC32；MMKV 重复键取最后一条，空值记录表示删除。
+
+目前只支持已验证的 MMKV 元数据版本 3。配置缺失、无法解密或路径已失效时回退到上述默认目录；读取失败会显示警告，不修改配置。配置与注册表必须属于实际运行官方启动器的 Windows 用户，换账户提权可能读不到原用户配置。传入 `LauncherRoot` 仍会读取游戏配置注册表，只有非空 `GamePath` 才跳过配置解密。
+
+脚本不再枚举其他游戏子目录，也不扫描其他磁盘；配置指向的其他磁盘路径仍可使用。根目录或任一程序无法找到时，会在创建或复用进程之前报错退出。
 
 ### 2. 优先复用已有的 Games.exe
 

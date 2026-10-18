@@ -81,26 +81,163 @@ function Resolve-GamesExecutable {
     return $latest.Path
 }
 
+function Get-MmkvCrc32 {
+    param([byte[]] $Data, [int] $Offset, [int] $Count)
+    [uint32] $crc = [uint32]::MaxValue
+    for ($i = $Offset; $i -lt $Offset + $Count; $i++) {
+        $crc = $crc -bxor $Data[$i]
+        for ($bit = 0; $bit -lt 8; $bit++) {
+            if ($crc -band 1) { $crc = ($crc -shr 1) -bxor [uint32]3988292384 }
+            else { $crc = $crc -shr 1 }
+        }
+    }
+    return $crc -bxor [uint32]::MaxValue
+}
+
+function Unprotect-MmkvData {
+    param([byte[]] $Data, [byte[]] $Key, [byte[]] $IV)
+    $aes = [Security.Cryptography.Aes]::Create()
+    $encryptor = $null
+    try {
+        $aes.Mode = [Security.Cryptography.CipherMode]::ECB
+        $aes.Padding = [Security.Cryptography.PaddingMode]::None
+        $aes.Key = $Key
+        $encryptor = $aes.CreateEncryptor()
+        $plain = [byte[]]::new($Data.Length)
+        $stream = [byte[]]::new(16)
+        $feedback = [byte[]]$IV.Clone()
+        # Implement CFB128 with AES blocks: .NET Framework's CFB support differs from modern .NET.
+        for ($offset = 0; $offset -lt $Data.Length; $offset += 16) {
+            $null = $encryptor.TransformBlock($feedback, 0, 16, $stream, 0)
+            $count = [Math]::Min(16, $Data.Length - $offset)
+            for ($i = 0; $i -lt $count; $i++) {
+                $plain[$offset + $i] = $Data[$offset + $i] -bxor $stream[$i]
+            }
+            [Array]::Copy($Data, $offset, $feedback, 0, $count)
+        }
+        return , $plain
+    }
+    finally {
+        if ($null -ne $encryptor) { $encryptor.Dispose() }
+        $aes.Dispose()
+    }
+}
+
+function Read-MmkvVarint {
+    param([byte[]] $Data, [ref] $Position, [int] $Limit)
+    [uint32] $value = 0
+    for ($shift = 0; $shift -lt 35; $shift += 7) {
+        if ($Position.Value -ge $Limit) { throw 'Truncated MMKV varint.' }
+        $b = $Data[$Position.Value]
+        $Position.Value++
+        if ($shift -eq 28 -and $b -gt 15) { throw 'Invalid MMKV varint.' }
+        $value = $value -bor ([uint32]($b -band 127) -shl $shift)
+        if ($b -lt 128) { return $value }
+    }
+    throw 'Invalid MMKV varint.'
+}
+
+function Read-MmkvGamePaths {
+    param([byte[]] $Data, [byte[]] $Metadata, [string] $Guid)
+    if ($Data.Length -lt 4 -or $Metadata.Length -lt 32) { throw 'Truncated MMKV header.' }
+    # shortcut: only metadata v3 is verified; add other versions when samples are available.
+    if ([BitConverter]::ToUInt32($Metadata, 4) -ne 3) { throw 'Unsupported MMKV metadata version.' }
+    $length = [BitConverter]::ToUInt32($Data, 0)
+    if ($length -gt $Data.Length - 4 -or $length -ne [BitConverter]::ToUInt32($Metadata, 28)) {
+        throw 'MMKV length mismatch.'
+    }
+    if ((Get-MmkvCrc32 -Data $Data -Offset 4 -Count $length) -ne [BitConverter]::ToUInt32($Metadata, 0)) {
+        throw 'MMKV CRC mismatch; the launcher may be updating its cache.'
+    }
+    if (-not $Guid) { throw 'Missing launcher REG_GUID.' }
+    if ($length -eq 0) { return }
+    $md5 = [Security.Cryptography.MD5]::Create()
+    try {
+        $hash = $md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($Guid + '*B59C326D-A124-413B-AABC-0D98D8B41966*'))
+        $key = [Text.Encoding]::ASCII.GetBytes(([BitConverter]::ToString($hash).Replace('-', '')).Substring(0, 16))
+    }
+    finally { $md5.Dispose() }
+    $plain = Unprotect-MmkvData -Data $Data[4..(3 + $length)] -Key $key -IV $Metadata[12..27]
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $utf16 = [Text.UnicodeEncoding]::new($false, $false, $true)
+    $paths = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    $position = 0
+    $null = Read-MmkvVarint -Data $plain -Position ([ref]$position) -Limit $length
+    while ($position -lt $length) {
+        $count = Read-MmkvVarint -Data $plain -Position ([ref]$position) -Limit $length
+        if ($count -eq 0 -or $count -gt $length - $position) { throw 'Invalid MMKV key length.' }
+        $name = $utf8.GetString($plain, $position, $count)
+        if ($name.Contains([string][char]0)) { throw 'Invalid MMKV key.' }
+        $position += $count
+        $count = Read-MmkvVarint -Data $plain -Position ([ref]$position) -Limit $length
+        if ($count -gt $length - $position) { throw 'Invalid MMKV value length.' }
+        $end = $position + $count
+        if ($name.StartsWith('game_install_path_', [StringComparison]::Ordinal)) {
+            if ($count -eq 0) { $null = $paths.Remove($name) }
+            else {
+                $count = Read-MmkvVarint -Data $plain -Position ([ref]$position) -Limit $end
+                if ($count -ne $end - $position -or $count % 2) { throw 'Invalid MMKV path length.' }
+                $path = $utf16.GetString($plain, $position, $count).TrimEnd([char]0)
+                if ($path.Contains([string][char]0) -or $path -notmatch '^(?:[a-zA-Z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
+                    throw 'Invalid absolute MMKV game path.'
+                }
+                $paths[$name] = $path
+            }
+        }
+        $position = $end
+    }
+    return $paths.Values
+}
+
+function Read-MmkvFile {
+    param([string] $Path)
+    # MMKV may keep a write handle open; length and CRC checks reject inconsistent snapshots.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $buffer = [IO.MemoryStream]::new()
+    try {
+        $stream.CopyTo($buffer)
+        return , $buffer.ToArray()
+    }
+    finally {
+        $buffer.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Get-CachedGameExecutable {
+    $candidates = @(foreach ($entry in (Get-ChildItem -LiteralPath 'HKCU:\Software\HyperGryph\Launcher' -ErrorAction SilentlyContinue)) {
+            $cache = Join-Path ([Environment]::GetFolderPath('UserProfile')) "AppData\LocalLow\HyperGryph\$($entry.PSChildName)\config\config_cache"
+            if (-not (Test-Path -LiteralPath $cache -PathType Leaf)) { continue }
+            try {
+                if ($entry.GetValueKind('REG_GUID') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+                    throw 'Launcher REG_GUID is not a string.'
+                }
+                $paths = Read-MmkvGamePaths -Data (Read-MmkvFile $cache) `
+                    -Metadata (Read-MmkvFile "$cache.crc") -Guid ($entry.GetValue('REG_GUID'))
+                foreach ($path in $paths) {
+                    $candidate = Join-Path $path 'Endfield.exe'
+                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+                }
+            }
+            catch { Write-Warning "Cannot read launcher cache '$cache': $($_.Exception.Message)" }
+        })
+    $candidates = @($candidates | Sort-Object -Unique)
+    if ($candidates.Count -gt 1) {
+        throw "Multiple cached Endfield.exe paths found: $($candidates -join '; '). Specify -GamePath."
+    }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+}
+
 function Resolve-GameExecutable {
     param([string] $Root)
+    $cached = Get-CachedGameExecutable
+    if ($cached) { return $cached }
     $games = Join-Path $Root 'games'
-    # New launcher builds install to "Arknights Endfield"; older ones used "Endfield Game".
     foreach ($name in @('Arknights Endfield', 'Endfield Game')) {
         $candidate = Join-Path $games "$name\Endfield.exe"
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
-    $candidates = @(foreach ($folder in (Get-ChildItem -LiteralPath $games -Directory -ErrorAction SilentlyContinue)) {
-        $candidate = Join-Path $folder.FullName 'Endfield.exe'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
-    })
-    if ($candidates.Count -eq 1) {
-        Write-Warning "No known game directory name; using $($candidates[0])."
-        return $candidates[0]
-    }
-    if ($candidates.Count -eq 0) {
-        throw "Endfield.exe not found under: $(Join-Path $games '*'). Check the installation under -LauncherRoot."
-    }
-    throw "Multiple Endfield.exe candidates found under ${games}: $($candidates -join '; '). Remove the unused installation or report the layout."
+    throw "Endfield.exe not found in launcher cache or default directories under: $games . Specify -GamePath."
 }
 
 function Resolve-EndfieldPaths {
@@ -130,8 +267,8 @@ function Resolve-EndfieldPaths {
     }
     return [pscustomobject]@{
         Games = (Resolve-Path -LiteralPath $GamesPath).ProviderPath
-        Game = (Resolve-Path -LiteralPath $GamePath).ProviderPath
-        Root = [IO.Path]::GetFullPath($root)
+        Game  = (Resolve-Path -LiteralPath $GamePath).ProviderPath
+        Root  = [IO.Path]::GetFullPath($root)
     }
 }
 
@@ -148,12 +285,12 @@ try {
     }
     if (-not $ownsInstanceMutex) { return }
 
-if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
-$paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot -GamePath $GamePath
-Write-Host "Games.exe: $($paths.Games)"
-Write-Host "Endfield.exe: $($paths.Game)"
+    if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
+    $paths = Resolve-EndfieldPaths -LauncherRoot $LauncherRoot -GamePath $GamePath
+    Write-Host "Games.exe: $($paths.Games)"
+    Write-Host "Endfield.exe: $($paths.Game)"
 
-$nativeSource = @'
+    $nativeSource = @'
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -407,41 +544,41 @@ public static class EndfieldParentLaunch
 }
 '@
 
-if (-not ('EndfieldParentLaunch' -as [type])) {
-    Add-Type -TypeDefinition $nativeSource
-}
-[EndfieldParentLaunch]::ValidateLayout()
+    if (-not ('EndfieldParentLaunch' -as [type])) {
+        Add-Type -TypeDefinition $nativeSource
+    }
+    [EndfieldParentLaunch]::ValidateLayout()
 
-$parentInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
-$gameInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
-$ownsParent = $false
-try {
-    $parentInfo = [EndfieldParentLaunch]::FindExistingParent($paths.Games, $paths.Root)
-    if ($parentInfo.hProcess -eq [IntPtr]::Zero) {
-        $parentInfo = [EndfieldParentLaunch]::CreateSuspendedParent($paths.Games)
-        $ownsParent = $true
-        Write-Host "Created suspended Games.exe PID: $($parentInfo.dwProcessId)"
-    }
-    else {
-        Write-Host "Reusing Games.exe PID: $($parentInfo.dwProcessId); it will NOT be terminated."
-    }
-    $gameInfo = [EndfieldParentLaunch]::CreateGame($paths.Game, $parentInfo.hProcess, $GameArgs)
-    Write-Host "Endfield.exe PID: $($gameInfo.dwProcessId); parent PID: $($parentInfo.dwProcessId)"
-    Write-Host 'Waiting for Endfield.exe to exit. Keep this console open.'
-    # INFINITE waits on the kernel process object without a recurring timer.
-    $null = [EndfieldParentLaunch]::HasExited($gameInfo.hProcess, [uint32]::MaxValue)
-    $gameExitCode = [EndfieldParentLaunch]::ExitCode($gameInfo.hProcess)
-    Write-Host ('Endfield.exe exited: {0} (0x{0:X8})' -f $gameExitCode)
-}
-finally {
+    $parentInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
+    $gameInfo = New-Object 'EndfieldParentLaunch+PROCESS_INFORMATION'
+    $ownsParent = $false
     try {
-        if ($ownsParent) { [EndfieldParentLaunch]::StopParent($parentInfo) }
+        $parentInfo = [EndfieldParentLaunch]::FindExistingParent($paths.Games, $paths.Root)
+        if ($parentInfo.hProcess -eq [IntPtr]::Zero) {
+            $parentInfo = [EndfieldParentLaunch]::CreateSuspendedParent($paths.Games)
+            $ownsParent = $true
+            Write-Host "Created suspended Games.exe PID: $($parentInfo.dwProcessId)"
+        }
+        else {
+            Write-Host "Reusing Games.exe PID: $($parentInfo.dwProcessId); it will NOT be terminated."
+        }
+        $gameInfo = [EndfieldParentLaunch]::CreateGame($paths.Game, $parentInfo.hProcess, $GameArgs)
+        Write-Host "Endfield.exe PID: $($gameInfo.dwProcessId); parent PID: $($parentInfo.dwProcessId)"
+        Write-Host 'Waiting for Endfield.exe to exit. Keep this console open.'
+        # INFINITE waits on the kernel process object without a recurring timer.
+        $null = [EndfieldParentLaunch]::HasExited($gameInfo.hProcess, [uint32]::MaxValue)
+        $gameExitCode = [EndfieldParentLaunch]::ExitCode($gameInfo.hProcess)
+        Write-Host ('Endfield.exe exited: {0} (0x{0:X8})' -f $gameExitCode)
     }
     finally {
-        [EndfieldParentLaunch]::Close($gameInfo)
-        [EndfieldParentLaunch]::Close($parentInfo)
+        try {
+            if ($ownsParent) { [EndfieldParentLaunch]::StopParent($parentInfo) }
+        }
+        finally {
+            [EndfieldParentLaunch]::Close($gameInfo)
+            [EndfieldParentLaunch]::Close($parentInfo)
+        }
     }
-}
 }
 finally {
     try {
